@@ -1,4 +1,5 @@
 require('dotenv').config();
+const http = require('http');
 const { Client, GatewayIntentBits } = require('discord.js');
 
 process.on('unhandledRejection', (error) => {
@@ -16,6 +17,9 @@ const client = new Client({
     ]
 });
 
+const trialRoleId = '1490040277837025510';
+const usedRoleId = '1490040724539052243';
+
 client.once('ready', () => {
     console.log(`Бот запущен как ${client.user.tag}`);
 });
@@ -25,9 +29,6 @@ client.on('error', (error) => {
 });
 
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
-    const trialRoleId = '1490040277837025510';
-    const usedRoleId = '1490040724539052243';
-
     const hadTrial = oldMember.roles.cache.has(trialRoleId);
     const hasTrial = newMember.roles.cache.has(trialRoleId);
 
@@ -55,6 +56,15 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
             }
         }, 3 * 24 * 60 * 60 * 1000);
     }
+});
+
+const port = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bee Trial Bot is running');
+}).listen(port, () => {
+    console.log(`HTTP server listening on port ${port}`);
 });
 
 console.log('Пробую подключиться к Discord...');
