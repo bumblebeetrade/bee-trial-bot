@@ -18,9 +18,7 @@ const client = new Client({
 
 const app = express();
 
-// =========================
-// CONFIG
-// =========================
+// ================= CONFIG =================
 const TOKEN = process.env.TOKEN;
 
 const GUILD_ID = '1155789152831418378';
@@ -37,141 +35,93 @@ const REMINDER_24H_MS = 24 * 60 * 60 * 1000;
 const REMINDER_3H_MS = 3 * 60 * 60 * 1000;
 const REMINDER_30M_MS = 30 * 60 * 1000;
 
-// Replace later with your VIP / checkout / ticket / payment link
 const UPGRADE_URL = 'https://discord.com/channels/1155789152831418378/1490087568140795994';
 
-// Persistent files
+// ================= FILES =================
 const DATA_DIR = path.join(__dirname, 'data');
 const TRIALS_FILE = path.join(DATA_DIR, 'trials.json');
 const PANEL_FILE = path.join(DATA_DIR, 'panel.json');
 
 let isCheckingTrials = false;
 
-// =========================
-// FILE HELPERS
-// =========================
+// ================= FILE HELPERS =================
 function ensureDataFiles() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-
-  if (!fs.existsSync(TRIALS_FILE)) {
-    fs.writeFileSync(TRIALS_FILE, JSON.stringify({}, null, 2));
-  }
-
-  if (!fs.existsSync(PANEL_FILE)) {
-    fs.writeFileSync(PANEL_FILE, JSON.stringify({}, null, 2));
-  }
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(TRIALS_FILE)) fs.writeFileSync(TRIALS_FILE, JSON.stringify({}, null, 2));
+  if (!fs.existsSync(PANEL_FILE)) fs.writeFileSync(PANEL_FILE, JSON.stringify({}, null, 2));
 }
 
-function readJson(filePath) {
+function readJson(file) {
   try {
-    if (!fs.existsSync(filePath)) return {};
-    const raw = fs.readFileSync(filePath, 'utf8');
-    return raw ? JSON.parse(raw) : {};
-  } catch (error) {
-    console.error(`Failed to read JSON from ${filePath}:`, error);
+    if (!fs.existsSync(file)) return {};
+    return JSON.parse(fs.readFileSync(file, 'utf8') || '{}');
+  } catch {
     return {};
   }
 }
 
-function writeJson(filePath, data) {
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error(`Failed to write JSON to ${filePath}:`, error);
-  }
+function writeJson(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-function getTrials() {
-  return readJson(TRIALS_FILE);
+function getTrials() { return readJson(TRIALS_FILE); }
+function saveTrials(d) { writeJson(TRIALS_FILE, d); }
+function getPanel() { return readJson(PANEL_FILE); }
+function savePanel(d) { writeJson(PANEL_FILE, d); }
+
+// ================= UTILS =================
+function ts(ms) {
+  return `<t:${Math.floor(ms / 1000)}:F>`;
+}
+function rel(ms) {
+  return `<t:${Math.floor(ms / 1000)}:R>`;
 }
 
-function saveTrials(data) {
-  writeJson(TRIALS_FILE, data);
+// ================= VIP EMBEDS =================
+function createWelcomeEmbed(username, expiresAt) {
+  return new EmbedBuilder()
+    .setTitle('🚀 Welcome to Bee Trade Club Trial')
+    .setDescription(
+      `Hey **${username}**,\n\n` +
+      `Your **free 3-day trial** is now active.\n\n` +
+      `⏳ Ends: ${ts(expiresAt)} (${rel(expiresAt)})`
+    )
+    .addFields(
+      { name: '✨ Included', value: '• Premium channels\n• Trade insights\n• Full access' },
+      { name: '⚠️ Important', value: 'Trial can be used only once.' },
+      { name: '💎 Upgrade', value: `[Go VIP](${UPGRADE_URL})` }
+    )
+    .setColor(0x2ECC71)
+    .setFooter({ text: 'Bee Trial Bot' })
+    .setTimestamp();
 }
 
-function getPanelData() {
-  return readJson(PANEL_FILE);
+function createReminderEmbed(time, expiresAt) {
+  return new EmbedBuilder()
+    .setTitle('⏳ Trial Ending Soon')
+    .setDescription(
+      `Your trial ends in **${time}**.\n\n` +
+      `📅 ${ts(expiresAt)} (${rel(expiresAt)})`
+    )
+    .addFields(
+      { name: '🔥 Stay inside', value: 'Upgrade to VIP to keep access.' },
+      { name: '💎 Upgrade', value: `[Click here](${UPGRADE_URL})` }
+    )
+    .setColor(0xF1C40F)
+    .setTimestamp();
 }
 
-function savePanelData(data) {
-  writeJson(PANEL_FILE, data);
+function createExpiredEmbed() {
+  return new EmbedBuilder()
+    .setTitle('⌛ Trial Ended')
+    .setDescription('Your trial has ended.\n\nUpgrade to continue.')
+    .addFields({ name: '💎 Upgrade', value: `[Open VIP](${UPGRADE_URL})` })
+    .setColor(0xE74C3C)
+    .setTimestamp();
 }
 
-// =========================
-// DATA SHAPE / MIGRATION
-// =========================
-function normalizeTrials(data) {
-  let changed = false;
-
-  for (const userId of Object.keys(data)) {
-    const record = data[userId];
-
-    if (!record || typeof record !== 'object') {
-      data[userId] = {
-        used: true,
-        active: false,
-        claimedAt: 0,
-        expiresAt: 0,
-        reminder24hSent: false,
-        reminder3hSent: false,
-        reminder30mSent: false
-      };
-      changed = true;
-      continue;
-    }
-
-    if (record.expires && !record.expiresAt) {
-      record.expiresAt = record.expires;
-      delete record.expires;
-      changed = true;
-    }
-
-    if (record.used === undefined) {
-      record.used = true;
-      changed = true;
-    }
-
-    if (record.active === undefined) {
-      record.active = !!record.expiresAt && Date.now() < record.expiresAt;
-      changed = true;
-    }
-
-    if (record.claimedAt === undefined) {
-      record.claimedAt = Date.now();
-      changed = true;
-    }
-
-    if (record.reminder24hSent === undefined) {
-      record.reminder24hSent = false;
-      changed = true;
-    }
-
-    if (record.reminder3hSent === undefined) {
-      record.reminder3hSent = false;
-      changed = true;
-    }
-
-    if (record.reminder30mSent === undefined) {
-      record.reminder30mSent = false;
-      changed = true;
-    }
-
-    if (record.reminded24h !== undefined) {
-      delete record.reminded24h;
-      changed = true;
-    }
-  }
-
-  if (changed) saveTrials(data);
-  return data;
-}
-
-// =========================
-// PANEL
-// =========================
-function createTrialButtonRow() {
+// ================= PANEL =================
+function buttonRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('get_trial')
@@ -181,416 +131,160 @@ function createTrialButtonRow() {
 }
 
 const PANEL_TEXT =
-  '🚀 **FREE TRIAL ACCESS**\n\nClick the button below to get full access for 3 days.\n\n⚠️ Trial is available only once.';
+`🚀 **FREE TRIAL ACCESS**
 
-// =========================
-// LOGGING
-// =========================
-async function sendLog(message) {
-  try {
-    const channel = await client.channels.fetch(TRIAL_LOGS_CHANNEL_ID);
-    if (!channel) return;
-    await channel.send(message);
-  } catch (error) {
-    console.error('Failed to send log message:', error);
-  }
-}
+Click the button below to get full access for 3 days.
 
-// =========================
-// PANEL MANAGEMENT
-// =========================
-async function ensureTrialPanel() {
-  const panelData = getPanelData();
-  const channel = await client.channels.fetch(GET_TRIAL_CHANNEL_ID);
+⚠️ Trial is available only once.`;
 
-  if (!channel) {
-    console.log('Get-trial channel not found.');
-    return;
-  }
+// ================= PANEL SETUP =================
+async function ensurePanel() {
+  const data = getPanel();
+  const ch = await client.channels.fetch(GET_TRIAL_CHANNEL_ID);
 
-  if (panelData.messageId) {
+  if (data.messageId) {
     try {
-      const existingMessage = await channel.messages.fetch(panelData.messageId);
-
-      await existingMessage.edit({
-        content: PANEL_TEXT,
-        components: [createTrialButtonRow()]
-      });
-
-      console.log('Existing trial panel restored.');
+      const msg = await ch.messages.fetch(data.messageId);
+      await msg.edit({ content: PANEL_TEXT, components: [buttonRow()] });
       return;
-    } catch {
-      console.log('Saved panel message not found. Creating a new one.');
-    }
+    } catch {}
   }
 
-  const newMessage = await channel.send({
-    content: PANEL_TEXT,
-    components: [createTrialButtonRow()]
-  });
-
-  savePanelData({ messageId: newMessage.id });
-  console.log('Trial panel created and saved.');
+  const msg = await ch.send({ content: PANEL_TEXT, components: [buttonRow()] });
+  savePanel({ messageId: msg.id });
 }
 
-// =========================
-// ROLE HELPERS
-// =========================
-async function grantTrialRole(member) {
-  if (!member.roles.cache.has(TRIAL_ROLE_ID)) {
+// ================= LOG =================
+async function log(msg) {
+  try {
+    const ch = await client.channels.fetch(TRIAL_LOGS_CHANNEL_ID);
+    if (ch) await ch.send(msg);
+  } catch {}
+}
+
+// ================= ROLES =================
+async function giveTrial(member) {
+  if (!member.roles.cache.has(TRIAL_ROLE_ID))
     await member.roles.add(TRIAL_ROLE_ID);
-  }
 }
 
-async function revokeTrialRole(member) {
-  if (member.roles.cache.has(TRIAL_ROLE_ID)) {
+async function removeTrial(member) {
+  if (member.roles.cache.has(TRIAL_ROLE_ID))
     await member.roles.remove(TRIAL_ROLE_ID);
-  }
 }
 
-async function grantUsedRole(member) {
-  if (!member.roles.cache.has(TRIAL_USED_ROLE_ID)) {
+async function giveUsed(member) {
+  if (!member.roles.cache.has(TRIAL_USED_ROLE_ID))
     await member.roles.add(TRIAL_USED_ROLE_ID);
-  }
 }
 
-// =========================
-// EMBEDS
-// =========================
-function formatDiscordTimestamp(ms) {
-  return `<t:${Math.floor(ms / 1000)}:F>`;
-}
-
-function formatDiscordRelative(ms) {
-  return `<t:${Math.floor(ms / 1000)}:R>`;
-}
-
-function createWelcomeEmbed(username, expiresAt) {
-  return new EmbedBuilder()
-    .setTitle('🚀 Your Trial Is Now Active')
-    .setDescription(
-      `Hey **${username}**, your free 3-day trial has been activated.\n\n` +
-      `You now have access until **${formatDiscordTimestamp(expiresAt)}** (${formatDiscordRelative(expiresAt)}).`
-    )
-    .addFields(
-      {
-        name: 'What you get',
-        value: '• Full access to premium channels\n• Real trade insights\n• Full experience for 3 days'
-      },
-      {
-        name: 'Important',
-        value: 'This trial can only be used once.'
-      }
-    )
-    .setColor(0x2ECC71)
-    .setFooter({ text: 'Bee Trial Bot' })
-    .setTimestamp();
-}
-
-function createReminderEmbed(timeText, expiresAt) {
-  return new EmbedBuilder()
-    .setTitle('⏳ Trial Reminder')
-    .setDescription(
-      `Your free trial will end in **${timeText}**.\n\n` +
-      `Trial end: **${formatDiscordTimestamp(expiresAt)}** (${formatDiscordRelative(expiresAt)})`
-    )
-    .addFields({
-      name: 'Next step',
-      value: `[Upgrade to VIP](${UPGRADE_URL}) to keep your access active.`
-    })
-    .setColor(0xF1C40F)
-    .setFooter({ text: 'Bee Trial Bot' })
-    .setTimestamp();
-}
-
-function createExpiredEmbed() {
-  return new EmbedBuilder()
-    .setTitle('⌛ Trial Ended')
-    .setDescription(
-      'Your 3-day trial has ended.\n\nUpgrade to VIP to continue access.'
-    )
-    .addFields({
-      name: 'Continue here',
-      value: `[Open upgrade page](${UPGRADE_URL})`
-    })
-    .setColor(0xE74C3C)
-    .setFooter({ text: 'Bee Trial Bot' })
-    .setTimestamp();
-}
-
-// =========================
-// DM HELPERS
-// =========================
-async function sendWelcomeDM(member, expiresAt) {
-  try {
-    await member.send({
-      embeds: [createWelcomeEmbed(member.user.username, expiresAt)]
-    });
-  } catch {
-    console.log(`Could not send welcome DM to ${member.user.tag}.`);
-  }
-}
-
-async function sendExpiredDM(member) {
-  try {
-    await member.send({
-      embeds: [createExpiredEmbed()]
-    });
-  } catch {
-    console.log(`Could not send expiration DM to ${member.user.tag}.`);
-  }
-}
-
-// =========================
-// REMINDERS
-// =========================
-async function sendReminder(member, record, trials, type) {
-  try {
-    let embed;
-    let logText;
-
-    if (type === '24h' && !record.reminder24hSent) {
-      embed = createReminderEmbed('24 hours', record.expiresAt);
-      record.reminder24hSent = true;
-      logText = `📩 24-hour reminder sent to ${member.user.tag}.`;
-    } else if (type === '3h' && !record.reminder3hSent) {
-      embed = createReminderEmbed('3 hours', record.expiresAt);
-      record.reminder3hSent = true;
-      logText = `📩 3-hour reminder sent to ${member.user.tag}.`;
-    } else if (type === '30m' && !record.reminder30mSent) {
-      embed = createReminderEmbed('30 minutes', record.expiresAt);
-      record.reminder30mSent = true;
-      logText = `📩 30-minute reminder sent to ${member.user.tag}.`;
-    } else {
-      return;
-    }
-
-    await member.send({ embeds: [embed] });
-    trials[member.id] = record;
-    saveTrials(trials);
-    await sendLog(logText);
-  } catch {
-    console.log(`Could not send ${type} reminder to ${member.user.tag}.`);
-  }
-}
-
-// =========================
-// EXPIRATION
-// =========================
-async function expireTrialForUserId(guild, userId, record, trials) {
-  record.active = false;
-  trials[userId] = record;
-  saveTrials(trials);
-
-  let member = null;
-  try {
-    member = await guild.members.fetch(userId);
-  } catch {
-    return;
-  }
-
-  try {
-    await revokeTrialRole(member);
-    await grantUsedRole(member);
-
-    await sendLog(`⏰ Trial expired for ${member.user.tag}.`);
-    await sendExpiredDM(member);
-  } catch (error) {
-    console.error(`Failed to finalize expired trial for ${userId}:`, error);
-  }
-}
-
-// =========================
-// MAIN CHECKER
-// =========================
+// ================= CHECKER =================
 async function checkTrials() {
   if (isCheckingTrials) return;
   isCheckingTrials = true;
 
-  try {
-    const now = Date.now();
-    const trials = normalizeTrials(getTrials());
-    const guild =
-      client.guilds.cache.get(GUILD_ID) || (await client.guilds.fetch(GUILD_ID));
+  const trials = getTrials();
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const now = Date.now();
 
-    for (const userId of Object.keys(trials)) {
-      const record = trials[userId];
-      if (!record || !record.active || !record.expiresAt) continue;
+  for (const id in trials) {
+    const t = trials[id];
+    if (!t.active) continue;
 
-      const timeLeft = record.expiresAt - now;
+    const left = t.expiresAt - now;
 
-      if (timeLeft <= 0) {
-        await expireTrialForUserId(guild, userId, record, trials);
-        continue;
-      }
+    if (left <= 0) {
+      t.active = false;
+      saveTrials(trials);
 
-      let reminderType = null;
-
-      if (timeLeft <= REMINDER_30M_MS && !record.reminder30mSent) {
-        reminderType = '30m';
-      } else if (timeLeft <= REMINDER_3H_MS && !record.reminder3hSent) {
-        reminderType = '3h';
-      } else if (timeLeft <= REMINDER_24H_MS && !record.reminder24hSent) {
-        reminderType = '24h';
-      }
-
-      if (!reminderType) continue;
-
-      let member = null;
       try {
-        member = await guild.members.fetch(userId);
-      } catch {
-        continue;
+        const m = await guild.members.fetch(id);
+        await removeTrial(m);
+        await giveUsed(m);
+        await m.send({ embeds: [createExpiredEmbed()] });
+        log(`⏰ expired ${m.user.tag}`);
+      } catch {}
+      continue;
+    }
+
+    try {
+      const m = await guild.members.fetch(id);
+
+      if (left < REMINDER_30M_MS && !t.r30) {
+        t.r30 = true;
+        m.send({ embeds: [createReminderEmbed('30 minutes', t.expiresAt)] });
+      } else if (left < REMINDER_3H_MS && !t.r3) {
+        t.r3 = true;
+        m.send({ embeds: [createReminderEmbed('3 hours', t.expiresAt)] });
+      } else if (left < REMINDER_24H_MS && !t.r24) {
+        t.r24 = true;
+        m.send({ embeds: [createReminderEmbed('24 hours', t.expiresAt)] });
       }
 
-      await sendReminder(member, record, trials, reminderType);
-    }
-  } catch (error) {
-    console.error('Error while checking trials:', error);
-  } finally {
-    isCheckingTrials = false;
+      saveTrials(trials);
+    } catch {}
   }
+
+  isCheckingTrials = false;
 }
 
-// =========================
-// EVENTS
-// =========================
+// ================= READY =================
 client.once(Events.ClientReady, async () => {
   console.log(`Bot started as ${client.user.tag}`);
 
   ensureDataFiles();
-  normalizeTrials(getTrials());
+  await ensurePanel();
 
-  await ensureTrialPanel();
-
-  setTimeout(() => {
-    checkTrials().catch((error) => {
-      console.error('Initial background checkTrials failed:', error);
-    });
-  }, 5000);
-
-  setInterval(() => {
-    checkTrials().catch((error) => {
-      console.error('Scheduled checkTrials failed:', error);
-    });
-  }, CHECK_INTERVAL_MS);
-
-  console.log('Trial checker started.');
+  setTimeout(checkTrials, 5000);
+  setInterval(checkTrials, CHECK_INTERVAL_MS);
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isButton()) return;
-  if (interaction.customId !== 'get_trial') return;
+// ================= BUTTON =================
+client.on(Events.InteractionCreate, async (i) => {
+  if (!i.isButton()) return;
+  if (i.customId !== 'get_trial') return;
 
-  try {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  await i.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const member = interaction.member;
-    const guild = interaction.guild;
+  const member = i.member;
+  const trials = getTrials();
 
-    if (!guild || !member) {
-      await interaction.editReply({
-        content: '❌ Guild or member data is unavailable.'
-      });
-      return;
+  if (trials[member.id]) {
+    const t = trials[member.id];
+
+    if (t.active && Date.now() < t.expiresAt) {
+      await giveTrial(member);
+      return i.editReply('✅ Your active trial has been restored.');
     }
 
-    const trials = normalizeTrials(getTrials());
-    const existing = trials[member.id];
-
-    if (existing) {
-      if (existing.active && existing.expiresAt && Date.now() < existing.expiresAt) {
-        await grantTrialRole(member);
-
-        await interaction.editReply({
-          content: '✅ Your active trial has been restored.'
-        });
-
-        await sendLog(`🔁 Active trial restored for ${member.user.tag}.`);
-        return;
-      }
-
-      await interaction.editReply({
-        content: '❌ You have already used your trial.'
-      });
-      return;
-    }
-
-    const expiresAt = Date.now() + TRIAL_DURATION_MS;
-
-    await grantTrialRole(member);
-
-    trials[member.id] = {
-      used: true,
-      active: true,
-      claimedAt: Date.now(),
-      expiresAt,
-      reminder24hSent: false,
-      reminder3hSent: false,
-      reminder30mSent: false
-    };
-
-    saveTrials(trials);
-
-    await interaction.editReply({
-      content: '✅ You have received a 3-day trial!'
-    });
-
-    sendLog(`🟢 ${member.user.tag} received trial access.`).catch(console.error);
-    sendWelcomeDM(member, expiresAt).catch(console.error);
-  } catch (error) {
-    console.error('Interaction error:', error);
-
-    try {
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({
-          content: '❌ Something went wrong. Please try again later.'
-        });
-      } else {
-        await interaction.reply({
-          content: '❌ Something went wrong. Please try again later.',
-          flags: MessageFlags.Ephemeral
-        });
-      }
-    } catch (replyError) {
-      console.error('Failed to send interaction error reply:', replyError);
-    }
+    return i.editReply('❌ You already used trial.');
   }
+
+  const expiresAt = Date.now() + TRIAL_DURATION_MS;
+
+  await giveTrial(member);
+
+  trials[member.id] = {
+    active: true,
+    expiresAt,
+    r24: false,
+    r3: false,
+    r30: false
+  };
+
+  saveTrials(trials);
+
+  i.editReply('✅ Trial activated!');
+
+  member.send({ embeds: [createWelcomeEmbed(member.user.username, expiresAt)] });
+
+  log(`🟢 ${member.user.tag} got trial`);
 });
 
-// =========================
-// OPTIONAL DEBUG
-// =========================
-client.on('error', (error) => {
-  console.error('Client error:', error);
-});
+// ================= WEB =================
+app.get('/', (req, res) => res.send('Bot running'));
+app.listen(process.env.PORT || 10000);
 
-client.on('warn', (info) => {
-  console.warn('Client warning:', info);
-});
-
-client.on('shardError', (error) => {
-  console.error('Shard error:', error);
-});
-
-// =========================
-// RENDER WEB SERVER
-// =========================
-app.get('/', (req, res) => {
-  res.send('Bee Trial Bot is running');
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`HTTP server listening on port ${PORT}`);
-});
-
-// =========================
-// START
-// =========================
 ensureDataFiles();
-
-console.log('Connecting to Discord...');
-client.login(TOKEN).catch((error) => {
-  console.error('Login error:', error);
-});
+console.log('Connecting...');
+client.login(TOKEN);
