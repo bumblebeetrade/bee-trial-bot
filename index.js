@@ -37,6 +37,7 @@ const REMINDER_24H_MS = 24 * 60 * 60 * 1000;
 const REMINDER_3H_MS = 3 * 60 * 60 * 1000;
 const REMINDER_30M_MS = 30 * 60 * 1000;
 
+// Replace later with your VIP / checkout / ticket / payment link
 const UPGRADE_URL = 'https://discord.com/channels/1155789152831418378/1490087568140795994';
 
 // Persistent files
@@ -264,6 +265,28 @@ function formatDiscordRelative(ms) {
   return `<t:${Math.floor(ms / 1000)}:R>`;
 }
 
+function createWelcomeEmbed(username, expiresAt) {
+  return new EmbedBuilder()
+    .setTitle('🚀 Your Trial Is Now Active')
+    .setDescription(
+      `Hey **${username}**, your free 3-day trial has been activated.\n\n` +
+      `You now have access until **${formatDiscordTimestamp(expiresAt)}** (${formatDiscordRelative(expiresAt)}).`
+    )
+    .addFields(
+      {
+        name: 'What you get',
+        value: '• Full access to premium channels\n• Real trade insights\n• Full experience for 3 days'
+      },
+      {
+        name: 'Important',
+        value: 'This trial can only be used once.'
+      }
+    )
+    .setColor(0x2ECC71)
+    .setFooter({ text: 'Bee Trial Bot' })
+    .setTimestamp();
+}
+
 function createReminderEmbed(timeText, expiresAt) {
   return new EmbedBuilder()
     .setTitle('⏳ Trial Reminder')
@@ -293,6 +316,29 @@ function createExpiredEmbed() {
     .setColor(0xE74C3C)
     .setFooter({ text: 'Bee Trial Bot' })
     .setTimestamp();
+}
+
+// =========================
+// DM HELPERS
+// =========================
+async function sendWelcomeDM(member, expiresAt) {
+  try {
+    await member.send({
+      embeds: [createWelcomeEmbed(member.user.username, expiresAt)]
+    });
+  } catch {
+    console.log(`Could not send welcome DM to ${member.user.tag}.`);
+  }
+}
+
+async function sendExpiredDM(member) {
+  try {
+    await member.send({
+      embeds: [createExpiredEmbed()]
+    });
+  } catch {
+    console.log(`Could not send expiration DM to ${member.user.tag}.`);
+  }
 }
 
 // =========================
@@ -348,12 +394,7 @@ async function expireTrialForUserId(guild, userId, record, trials) {
     await grantUsedRole(member);
 
     await sendLog(`⏰ Trial expired for ${member.user.tag}.`);
-
-    try {
-      await member.send({ embeds: [createExpiredEmbed()] });
-    } catch {
-      console.log(`Could not send expiration DM to ${member.user.tag}.`);
-    }
+    await sendExpiredDM(member);
   } catch (error) {
     console.error(`Failed to finalize expired trial for ${userId}:`, error);
   }
@@ -496,6 +537,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     });
 
     sendLog(`🟢 ${member.user.tag} received trial access.`).catch(console.error);
+    sendWelcomeDM(member, expiresAt).catch(console.error);
   } catch (error) {
     console.error('Interaction error:', error);
 
