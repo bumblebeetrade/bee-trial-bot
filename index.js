@@ -13,7 +13,10 @@ const fs = require('fs');
 const path = require('path');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers  // <-- ДОБАВЛЕН: нужен для guildMemberUpdate
+  ]
 });
 
 const app = express();
@@ -37,7 +40,6 @@ const REMINDER_24H_MS = 24 * 60 * 60 * 1000;
 const REMINDER_3H_MS = 3 * 60 * 60 * 1000;
 const REMINDER_30M_MS = 30 * 60 * 1000;
 
-// Replace later with your real VIP checkout / ticket / payment link if needed
 const UPGRADE_URL = 'https://discord.com/channels/1155789152831418378/1490087568140795994';
 
 // Persistent files
@@ -54,11 +56,9 @@ function ensureDataFiles() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
-
   if (!fs.existsSync(TRIALS_FILE)) {
     fs.writeFileSync(TRIALS_FILE, JSON.stringify({}, null, 2));
   }
-
   if (!fs.existsSync(PANEL_FILE)) {
     fs.writeFileSync(PANEL_FILE, JSON.stringify({}, null, 2));
   }
@@ -83,21 +83,10 @@ function writeJson(filePath, data) {
   }
 }
 
-function getTrials() {
-  return readJson(TRIALS_FILE);
-}
-
-function saveTrials(data) {
-  writeJson(TRIALS_FILE, data);
-}
-
-function getPanelData() {
-  return readJson(PANEL_FILE);
-}
-
-function savePanelData(data) {
-  writeJson(PANEL_FILE, data);
-}
+function getTrials() { return readJson(TRIALS_FILE); }
+function saveTrials(data) { writeJson(TRIALS_FILE, data); }
+function getPanelData() { return readJson(PANEL_FILE); }
+function savePanelData(data) { writeJson(PANEL_FILE, data); }
 
 // =========================
 // DATA SHAPE / MIGRATION
@@ -114,6 +103,7 @@ function normalizeTrials(data) {
         active: false,
         claimedAt: 0,
         expiresAt: 0,
+        manuallyRevoked: false,   // <-- НОВЫЙ ФЛАГ
         reminder24hSent: false,
         reminder3hSent: false,
         reminder30mSent: false
@@ -128,40 +118,20 @@ function normalizeTrials(data) {
       changed = true;
     }
 
-    if (record.used === undefined) {
-      record.used = true;
-      changed = true;
-    }
-
+    if (record.used === undefined) { record.used = true; changed = true; }
     if (record.active === undefined) {
       record.active = !!record.expiresAt && Date.now() < record.expiresAt;
       changed = true;
     }
+    if (record.claimedAt === undefined) { record.claimedAt = Date.now(); changed = true; }
 
-    if (record.claimedAt === undefined) {
-      record.claimedAt = Date.now();
-      changed = true;
-    }
+    // <-- НОВЫЙ ФЛАГ: добавляем к старым записям
+    if (record.manuallyRevoked === undefined) { record.manuallyRevoked = false; changed = true; }
 
-    if (record.reminder24hSent === undefined) {
-      record.reminder24hSent = false;
-      changed = true;
-    }
-
-    if (record.reminder3hSent === undefined) {
-      record.reminder3hSent = false;
-      changed = true;
-    }
-
-    if (record.reminder30mSent === undefined) {
-      record.reminder30mSent = false;
-      changed = true;
-    }
-
-    if (record.reminded24h !== undefined) {
-      delete record.reminded24h;
-      changed = true;
-    }
+    if (record.reminder24hSent === undefined) { record.reminder24hSent = false; changed = true; }
+    if (record.reminder3hSent === undefined) { record.reminder3hSent = false; changed = true; }
+    if (record.reminder30mSent === undefined) { record.reminder30mSent = false; changed = true; }
+    if (record.reminded24h !== undefined) { delete record.reminded24h; changed = true; }
   }
 
   if (changed) saveTrials(data);
@@ -211,12 +181,10 @@ async function ensureTrialPanel() {
   if (panelData.messageId) {
     try {
       const existingMessage = await channel.messages.fetch(panelData.messageId);
-
       await existingMessage.edit({
         content: PANEL_TEXT,
         components: [createTrialButtonRow()]
       });
-
       console.log('Existing trial panel restored.');
       return;
     } catch {
@@ -270,7 +238,7 @@ function createWelcomeEmbed(username, expiresAt) {
     .setTitle('🚀 Welcome to Bee Trade Club Trial')
     .setDescription(
       `Hey **${username}**,\n\n` +
-      `Your **free 3-day trial** is now active. You’ve unlocked temporary access to our premium experience.\n\n` +
+      `Your **free 3-day trial** is now active. You've unlocked temporary access to our premium experience.\n\n` +
       `⏳ **Trial ends:** ${formatDiscordTimestamp(expiresAt)} (${formatDiscordRelative(expiresAt)})`
     )
     .addFields(
@@ -344,9 +312,7 @@ function createExpiredEmbed() {
 // =========================
 async function sendWelcomeDM(member, expiresAt) {
   try {
-    await member.send({
-      embeds: [createWelcomeEmbed(member.user.username, expiresAt)]
-    });
+    await member.send({ embeds: [createWelcomeEmbed(member.user.username, expiresAt)] });
   } catch {
     console.log(`Could not send welcome DM to ${member.user.tag}.`);
   }
@@ -354,9 +320,7 @@ async function sendWelcomeDM(member, expiresAt) {
 
 async function sendExpiredDM(member) {
   try {
-    await member.send({
-      embeds: [createExpiredEmbed()]
-    });
+    await member.send({ embeds: [createExpiredEmbed()] });
   } catch {
     console.log(`Could not send expiration DM to ${member.user.tag}.`);
   }
@@ -411,6 +375,7 @@ async function expireTrialForUserId(guild, userId, record, trials) {
   }
 
   try {
+    // FIX #1: явно снимаем Trial роль перед выдачей Trial Used
     await revokeTrialRole(member);
     await grantUsedRole(member);
 
@@ -499,6 +464,41 @@ client.once(Events.ClientReady, async () => {
   console.log('Trial checker started.');
 });
 
+// =========================
+// FIX #2: Отслеживаем ручное снятие роли Trial администратором
+// =========================
+client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  // Проверяем только случай, когда Trial роль была убрана
+  const hadTrial = oldMember.roles.cache.has(TRIAL_ROLE_ID);
+  const hasTrial = newMember.roles.cache.has(TRIAL_ROLE_ID);
+
+  if (!hadTrial || hasTrial) return; // роль не снималась — выходим
+
+  const trials = normalizeTrials(getTrials());
+  const record = trials[newMember.id];
+
+  // Если запись активна и роль убрали — это ручное снятие администратором
+  if (record && record.active) {
+    record.active = false;
+    record.manuallyRevoked = true;
+    trials[newMember.id] = record;
+    saveTrials(trials);
+
+    // Выдаём Trial Used чтобы пользователь не мог снова нажать кнопку
+    try {
+      await grantUsedRole(newMember);
+    } catch (err) {
+      console.error(`Failed to grant Trial Used role after manual revoke for ${newMember.user.tag}:`, err);
+    }
+
+    await sendLog(`🔴 Trial manually revoked for ${newMember.user.tag} by an admin. Access blocked.`);
+    console.log(`Trial manually revoked for ${newMember.user.tag}, manuallyRevoked = true`);
+  }
+});
+
+// =========================
+// BUTTON INTERACTION
+// =========================
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;
   if (interaction.customId !== 'get_trial') return;
@@ -510,55 +510,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const guild = interaction.guild;
 
     if (!guild || !member) {
-      await interaction.editReply({
-        content: '❌ Guild or member data is unavailable.'
-      });
-      return;
-    }
-
-    // Hard block: if Trial Used role already exists, never issue a new trial
-    if (member.roles.cache.has(TRIAL_USED_ROLE_ID)) {
-      const trials = normalizeTrials(getTrials());
-      const existing = trials[member.id];
-
-      if (existing && existing.active && existing.expiresAt && Date.now() < existing.expiresAt) {
-        await grantTrialRole(member);
-
-        await interaction.editReply({
-          content: '✅ Your active trial has been restored.'
-        });
-
-        await sendLog(`🔁 Active trial restored for ${member.user.tag}.`);
-        return;
-      }
-
-      await interaction.editReply({
-        content: '❌ You have already used your trial.'
-      });
+      await interaction.editReply({ content: '❌ Guild or member data is unavailable.' });
       return;
     }
 
     const trials = normalizeTrials(getTrials());
     const existing = trials[member.id];
 
-    if (existing) {
-      if (existing.active && existing.expiresAt && Date.now() < existing.expiresAt) {
-        await grantTrialRole(member);
-
-        await interaction.editReply({
-          content: '✅ Your active trial has been restored.'
-        });
-
-        await sendLog(`🔁 Active trial restored for ${member.user.tag}.`);
-        return;
-      }
-
+    // FIX #2 продолжение: если роль была снята вручную — блокируем навсегда
+    if (existing && existing.manuallyRevoked) {
       await interaction.editReply({
-        content: '❌ You have already used your trial.'
+        content: '❌ Your trial access has been revoked by an administrator.'
       });
       return;
     }
 
+    // Hard block: роль Trial Used уже есть
+    if (member.roles.cache.has(TRIAL_USED_ROLE_ID)) {
+      // Восстановление только если trial ещё активен и НЕ отозван вручную
+      if (existing && existing.active && existing.expiresAt && Date.now() < existing.expiresAt) {
+        await grantTrialRole(member);
+        await interaction.editReply({ content: '✅ Your active trial has been restored.' });
+        await sendLog(`🔁 Active trial restored for ${member.user.tag}.`);
+        return;
+      }
+
+      await interaction.editReply({ content: '❌ You have already used your trial.' });
+      return;
+    }
+
+    // Запись существует (без Trial Used роли — нестандартная ситуация)
+    if (existing) {
+      if (existing.active && existing.expiresAt && Date.now() < existing.expiresAt) {
+        await grantTrialRole(member);
+        await interaction.editReply({ content: '✅ Your active trial has been restored.' });
+        await sendLog(`🔁 Active trial restored for ${member.user.tag}.`);
+        return;
+      }
+
+      await interaction.editReply({ content: '❌ You have already used your trial.' });
+      return;
+    }
+
+    // Новый триал
     const expiresAt = Date.now() + TRIAL_DURATION_MS;
 
     await grantTrialRole(member);
@@ -568,6 +562,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       active: true,
       claimedAt: Date.now(),
       expiresAt,
+      manuallyRevoked: false,
       reminder24hSent: false,
       reminder3hSent: false,
       reminder30mSent: false
@@ -575,9 +570,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     saveTrials(trials);
 
-    await interaction.editReply({
-      content: '✅ Trial activated!'
-    });
+    await interaction.editReply({ content: '✅ Trial activated!' });
 
     sendLog(`🟢 ${member.user.tag} got trial`).catch(console.error);
     sendWelcomeDM(member, expiresAt).catch(console.error);
@@ -586,9 +579,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({
-          content: '❌ Something went wrong. Please try again later.'
-        });
+        await interaction.editReply({ content: '❌ Something went wrong. Please try again later.' });
       } else {
         await interaction.reply({
           content: '❌ Something went wrong. Please try again later.',
@@ -602,19 +593,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // =========================
-// OPTIONAL DEBUG
+// DEBUG
 // =========================
-client.on('error', (error) => {
-  console.error('Client error:', error);
-});
-
-client.on('warn', (info) => {
-  console.warn('Client warning:', info);
-});
-
-client.on('shardError', (error) => {
-  console.error('Shard error:', error);
-});
+client.on('error', (error) => { console.error('Client error:', error); });
+client.on('warn', (info) => { console.warn('Client warning:', info); });
+client.on('shardError', (error) => { console.error('Shard error:', error); });
 
 // =========================
 // RENDER WEB SERVER
